@@ -25,6 +25,15 @@ from labfuns import *
 from sklearn import decomposition
 from matplotlib.colors import ColorConverter
 
+def fst((a,b)): return a
+def snd((a,b)): return b
+def fix(f): return lambda a: lambda b: f(b)(a)
+def take(i): return lambda l: l[:i]
+def eq(a): return lambda b: a == b
+def div(a): return lambda b: a / b
+def compose(f,g): return lambda x: f(g(x))
+def mean(x): return sum(x)/len(x)
+
 # ## Bayes classifier functions to implement
 #
 # The lab descriptions state what each function should do.
@@ -35,23 +44,29 @@ from matplotlib.colors import ColorConverter
 def computePrior(labels,W=None):
     ks=set(labels)
     N=len(labels)
-    prior=map(lambda n: float(n)/N,[len(filter(eq(k),labels)) for k in ks])
+    if W is None:
+        W = numpy.array([1.0/N] * N)
+    weightedLabels = zip(W,labels)
+    getClass = snd
+    getWeight = fst
+    ofClass = lambda k: compose(eq(k),getClass)
+    weightsByClass = lambda k: map(getWeight, filter(ofClass(k), weightedLabels))
+    prior = map(compose(sum,weightsByClass), ks)
     return numpy.array(prior)
 
+def sig((muk,WXk)):
+    getWeight = fst
+    getX = snd
+    Wk = map(getWeight, WXk)
+    Xk = map(getX, WXk)
+    diff = Xk-muk
+    return numpy.dot(Wk * diff.T, diff) / sum(Wk)
 
-def fst((a,b)): return a
-def snd((a,b)): return b
-def fix(f): return lambda a: lambda b: f(b)(a)
-def take(i): return lambda l: l[:i]
-def eq(a): return lambda b: a == b
-def div(a): return lambda b: a / b
-def compose(f,g): return lambda x: f(g(x))
-def mean(x): return sum(x)/len(x)
-
-
-def sig((muk,Xk)):
-    diff=(Xk-muk)
-    return numpy.dot(diff.T,diff)/float(len(Xk))
+def weightedmean(xs):
+    getWeight = fst
+    weightValue = lambda (wi,xi): wi*xi
+    m = sum(map(weightValue,xs))/sum(map(getWeight,xs))
+    return m
 
 # Note that you do not need to handle the W argument for this part
 # in:      X - N x d matrix of N data points
@@ -61,18 +76,18 @@ def sig((muk,Xk)):
 def mlParams(X,labels,W=None):
     ks = set(labels)
     N = len(X)
-    ofClass = lambda i: compose(eq(i),snd)
-    xsByClass = numpy.array([map(fst,filter(ofClass(k),zip(X,labels))) for k in ks])
-    mu = numpy.array(map(mean, xsByClass))
-    sigma = numpy.array(map(sig,zip(mu,xsByClass))).T
+    if W is None:
+        W = numpy.array([1.0/N] * N)
+    getClass = fst
+    getValue = snd
+    weightedValues = zip(W,X)
+    labledValues = zip(labels,weightedValues)
+    ofClass = lambda k: compose(eq(k),getClass)
+    getXOfClass = lambda k: map(getValue, filter(ofClass(k), labledValues))
+    wxsByClass = map(getXOfClass, ks) #[pairs of (wi,xi)] grouped by class
+    mu = numpy.array(map(weightedmean, wxsByClass))
+    sigma = numpy.array(map(sig,zip(mu,wxsByClass))).T
     return mu, sigma
-
-def solve_x_star(x,sigma,mu,k):
-    a = sigma[:,:,k]
-    muk = mu[k]
-    b = numpy.array([x_star - muk for x_star in x]).T
-    x = np.linalg.solve(a,b)
-    return x
 
 # in:      X - N x d matrix of M data points
 #      prior - C x 1 vector of class priors
@@ -80,11 +95,8 @@ def solve_x_star(x,sigma,mu,k):
 #      sigma - d x d x C matrix of class covariances
 # out:     h - N x 1 class predictions for test points
 def classify(X,prior,mu,sigma,covdiag=True):
-    # print(X.shape)
-    # print(prior.shape)
-    # print(mu.shape)
-    # print(sigma.shape)
     h = [0] * len(X)
+    Ls = [np.linalg.cholesky(sigma[:,:,k]) for k in range(len(mu))]
     for i,x_star in enumerate(X):
         maxval = float('-inf')
         selectedClass = -1
@@ -94,7 +106,7 @@ def classify(X,prior,mu,sigma,covdiag=True):
                 diff = x_star-muk
                 y = np.linalg.solve(sigma_k,diff.T)
             else:
-                L = np.linalg.cholesky(sigma_k)
+                L = Ls[k]
                 diff = x_star-muk
                 v = np.linalg.solve(L,diff.T)
                 y = np.linalg.solve(L.T,v)
@@ -113,8 +125,17 @@ def classify(X,prior,mu,sigma,covdiag=True):
 #
 # Call `genBlobs` and `plotGaussian` to verify your estimates.
 
+def normalized(a, axis=-1, order=2):
+    l2 = np.atleast_1d()
+    l2[l2==0] = 1
+    return a / np.expand_dims(l2, axis)
+
 X, labels = genBlobs(centers=5)
-mu, sigma = mlParams(X,labels)
+N = len(X)
+W = numpy.array(map(lambda (i,x): i+1, enumerate(X)))
+W = W / np.linalg.norm(W)
+mu, sigma = mlParams(X,labels,W)
+prior = computePrior(labels,W)
 # plotGaussian(X,labels,mu,sigma)
 
 
@@ -130,7 +151,11 @@ mu, sigma = mlParams(X,labels)
 #      sigmas - length T list of sigma as above
 #      alphas - T x 1 vector of vote weights
 def trainBoost(X,labels,T=5,covdiag=True):
-    # Your code here
+    N = len(X)
+    W = numpy.array([1/N] * N)
+    iteration = 0
+    priors = computePrior(labels, W)
+    mus, sigmas = mlParams(X, labels, W)
     return priors,mus,sigmas,alphas
 
 # in:       X - N x d matrix of N data points
@@ -244,7 +269,7 @@ def plotBoundary(dataset='iris',split=0.7,doboost=False,boostiter=5,covdiag=True
         try:
             CS = plt.contour(xRange,yRange,(grid==c).astype(float),15,linewidths=0.25,colors=conv.to_rgba_array(color))
         except ValueError:
-            pass   
+            pass
         xc = pX[py == c, :]
         plt.scatter(xc[:,0],xc[:,1],marker='o',c=color,s=40,alpha=0.5)
 
@@ -258,9 +283,12 @@ def plotBoundary(dataset='iris',split=0.7,doboost=False,boostiter=5,covdiag=True
 
 # Example usage of the functions
 
-for s in ['iris','wine','olivetti','vowel']:
-    testClassifier(dataset=s,split=0.7,doboost=False,boostiter=5,covdiag=True)
-    testClassifier(dataset=s,split=0.7,doboost=False,boostiter=5,covdiag=False)
-    plotBoundary(dataset=s,split=0.7,doboost=False,boostiter=5,covdiag=True)
-    plotBoundary(dataset=s,split=0.7,doboost=False,boostiter=5,covdiag=False)
-    plt.show()
+for s in ['iris']: #['iris','wine','olivetti','vowel']:
+    print('With covdiag:')
+    testClassifier(dataset=s,split=0.7,doboost=True,boostiter=5,covdiag=True)
+    print('Without covdiag:')
+    testClassifier(dataset=s,split=0.7,doboost=True,boostiter=5,covdiag=False)
+    print('')
+    # plotBoundary(dataset=s,split=0.7,doboost=False,boostiter=5,covdiag=True)
+    # plotBoundary(dataset=s,split=0.7,doboost=False,boostiter=5,covdiag=False)
+    # plt.show()
